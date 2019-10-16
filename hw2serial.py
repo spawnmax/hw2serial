@@ -1,12 +1,18 @@
-from tkinter import *
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, Tk, N, W, E, S, Label, StringVar, Button, Frame, BooleanVar, Canvas
+from clr import AddReference
+from serial import Serial, SerialException
+from os import path
+from ctypes import windll
 import time
-import json
-import clr
-import os
-import ctypes, sys
+from sys import executable
+from json import dump, load
 
 config_file = 'hw2serial.conf'
+ico_path = 'hw2serial.ico'
+time_sensor = '#Time'
+cpus_freq = '#CPUs Clock'
+cpus_temp = '#CPUs Temp'
+cpus_load = '#CPUs Load'
 hwTypes = ['Mainboard','SuperIO','CPU','RAM','GpuNvidia','GpuAti','TBalancer','Heatmaster','HDD']
 sensorTypes = ['Voltage','Clock','Temperature','Load','Fan','Flow','Control','Level','Factor','Power','Data','SmallData','Data']
 sensorUnits = [' V', 'MHz', '°C', '%', ' RPM', ' L/h', '%', '%', '', 'W', '', '', ''] # \u00B0C
@@ -14,13 +20,16 @@ run_key = 'Software\Microsoft\Windows\CurrentVersion\Run'
 prog_name = 'hw2serial.py'
 title = 'HW2Serial'
 
+refresh_periods = [2, 1, 0.5, 0.2, 0.1]      # period in seconds
+port_rates = ['9600', '19200', '38400', '57600', '115200']
 # Default config
-refreshPeriods = [2, 1, 0.5, 0.2, 0.1]
 defaults = {
+    'serial_port': '',
+    'baudrate': 9600,
     'refresh': 1,
     'minimize_to_tray': True,
     'launch_at_startup': False,
-    'sensors': ['Time','CPU Package Temperature','CPU Total Load', '', 'GPU Core Clock', '']
+    'sensors': [time_sensor,'CPU Package Temperature','CPU Total Load', '', 'GPU Core Clock', '']
 }
 
 class HW2Serial:
@@ -33,52 +42,38 @@ class HW2Serial:
 
         self.sensorValues = {}
         self.sensorUnits = {}
-        self.data2transfer = [None] * len(self.conf['sensors'])
         self.init_ohm()
         self.fetch_stats()
+        self.available_ports = self.check_serial_ports()
         # self.root.bind('<Return>', self.save_config())
 
+        self.sensors_frame = None
         self.draw_GUI()
 
         self.update_all()
 
-    def load_config(self):
-        try:
-            with open(config_file) as conf_file:
-                conf = json.load(conf_file)
-        except IOError:
-            conf = {}
-        if 'sensors' not in conf:
-            conf = defaults
-        self.savedConf = conf
-        return conf
-
-    def update_config(self):
+    def update_all(self):
+        """Update Hardware info, show it on GUI, send to serial. Launched every {} seconds""".format(self.conf['refresh'])
+        self.fetch_stats()
         for i, sensor in enumerate(self.conf['sensors']):
-            self.number_labels[i].set(i)
-            self.sensor_combos[i].set(sensor)
-            value = self.sensorValues.get(sensor, 0)
-            if value != 'n/a' and sensor not in ['Time']:
-                value = '{}{}'.format(round(float(value), 2), self.sensorUnits.get(sensor, ''))
-            self.value_labels[i].set(value)
-        self.refresh_period.set(self.conf['refresh'])
-        self.launch_at_start.set(self.conf['launch_at_startup'])
-        self.minimize_to_tray.set(self.conf['minimize_to_tray'])
-        self.change_minimize_to_tray()
-        self.change_launch_at_start()
+            self.format_sensor_value(i)
+        self.transfer_data()
+        self.root.after(int(self.conf['refresh']*1000), self.update_all)
 
-    def load_config_button(self):
-        if messagebox.askyesno(message='Are you sure you want to reload config?', icon = 'question', title = 'Loading saved config'):
-            self.conf = self.load_config()
-            self.update_config()
-
-    def save_config(self):
-        if messagebox.askyesno(message='Are you sure you want to save current config?', icon='question', title='Saving config'):
-            with open(config_file, 'w') as conf_file:
-                json.dump(self.conf, conf_file)
+    def transfer_data(self):
+        """Sending data to serial port"""
+        try:
+            with Serial(self.conf['serial_port'], self.conf['baudrate'], timeout=1) as ser:
+                ser.write(' '.join(self.data2transfer).encode())
+                self.canvas.itemconfig(self.connection, text='Connected')
+                self.canvas.itemconfig(self.circle, fill='green2')
+        except (OSError, SerialException):
+            self.canvas.itemconfig(self.connection, text='Not connected')
+            self.canvas.itemconfig(self.circle, fill='red2')
 
     def init_ohm(self):
-        clr.AddReference('OpenHardwareMonitorLib')
+        """Initialize sensors object from OpenHardwareMonitorLib.dll"""
+        AddReference('OpenHardwareMonitorLib')
         from OpenHardwareMonitor import Hardware
 
         self.handle = Hardware.Computer()
@@ -90,7 +85,9 @@ class HW2Serial:
         self.handle.Open()
 
     def fetch_stats(self):
-        self.sensorValues['Time'] = time.strftime("%H:%M:%S")
+        """Read hardware info"""
+        self.sensorValues[time_sensor] = time.strftime("%H:%M:%S")
+        self.cores_freq, self.cores_temp, self.cores_load = [], [], []
         for i in self.handle.Hardware:
             i.Update()
             for sensor in i.Sensors:
@@ -99,10 +96,14 @@ class HW2Serial:
                 j.Update()
                 for subsensor in j.Sensors:
                     self.parse_sensor(subsensor)
+        self.sensorValues[cpus_freq] = ":".join(self.cores_freq)
+        self.sensorValues[cpus_load] = ":".join(self.cores_load)
+        self.sensorValues[cpus_temp] = ":".join(self.cores_temp)
         self.sensorNames = sorted(list(self.sensorValues.keys()))
         self.update_data2transfer()
 
     def parse_sensor(self, sensor):
+        """Parsing sensor data and save it to class variables"""
         value = sensor.Value if sensor.Value else 'n/a'
         unit = sensorUnits[sensor.SensorType] if value != 'n/a' else ''
         unit = unit if sensorTypes[sensor.SensorType] not in ['Data', 'SmallData', 'Factor'] else ''
@@ -110,14 +111,37 @@ class HW2Serial:
             sensorname = '{}'.format(sensor.Name)
         else:
             sensorname = '{} {}'.format(sensor.Name, sensorTypes[sensor.SensorType]) # sensor.Hardware.Name
-        sensorvalue = str(value)
+        sensorvalue = '{:.0f}'.format(float(value)) if value != 'n/a' else '0'
         sensorunit = unit
+        if 'CPU Core ' in sensor.Name:
+            if sensorTypes[sensor.SensorType] == 'Clock':
+                self.cores_freq.append(sensorvalue)
+            if sensorTypes[sensor.SensorType] == 'Load':
+                self.cores_load.append(sensorvalue)
+            if sensorTypes[sensor.SensorType] == 'Temperature':
+                self.cores_temp.append(sensorvalue)
         self.sensorValues[sensorname] = sensorvalue
         self.sensorUnits[sensorname] = sensorunit
 
+    def check_serial_ports(self):
+        """ Lists serial port names """
+        ports = ['COM%s' % (i + 1) for i in range(256)]
+        result = ['']
+        for port in ports:
+            try:
+                if port == self.conf['serial_port']: continue
+                s = Serial(port)
+                s.close()
+                result.append(port)
+            except (OSError, SerialException):
+                pass
+        return result
+
     def update_data2transfer(self):
+        """Get sensors from combobox that should be transfered to serial port"""
+        self.data2transfer = [None] * len(self.conf['sensors'])
         for i, sensor_name in enumerate(self.conf['sensors']):
-            self.data2transfer[i] = self.sensorValues.get(sensor_name, 0)
+            self.data2transfer[i] = self.sensorValues.get(sensor_name, '0')
 
     def minimize(self):
         if self.conf['minimize_to_tray']:
@@ -137,55 +161,99 @@ class HW2Serial:
         self.root.resizable(False, False)
         self.sensors_frame = self.draw_sensors_frame(self.root)
         self.configs_frame = self.draw_frame_configs(self.root)
+        self.buttons_frame = self.draw_control_buttons(self.root)
         self.update_config()
         self.tray_icon = self.icon()
 
-    def draw_sensors_frame(self, parent):
-        sensors_frame = ttk.LabelFrame(parent, text='Hardware Data')
-        sensors_frame.pack(side="top", fill="both", expand=True, padx=5, pady=5, ipady=3) #.grid(column=0, row=0, padx=5, pady=5, sticky=(N, W, E))
-        sensors_frame.columnconfigure(1, weight=1)
+    def icon(self):
+        """Creating icon in system tray"""
+        AddReference('System.ComponentModel')
+        AddReference('System.Windows.Forms')
+        AddReference('System.Drawing')
+        from System.ComponentModel import Container
+        from System.Windows.Forms import NotifyIcon, MenuItem, ContextMenu
+        from System.Drawing import Icon
 
-        self.number_labels = [None] * len(self.conf['sensors'])
-        self.sensor_combos = [None] * len(self.conf['sensors'])
-        self.value_labels = [None] * len(self.conf['sensors'])
+        self.components = Container()
+        context_menu = ContextMenu()
+        menu_item = MenuItem('Show')
+        menu_item.Click += self.open_from_tray
+        context_menu.MenuItems.Add(menu_item)
+        menu_item = MenuItem('Quit')
+        menu_item.Click += self.quit
+        context_menu.MenuItems.Add(menu_item)
+        notifyIcon = NotifyIcon(self.components)
+        notifyIcon.Icon = Icon(ico_path)
+        notifyIcon.Text = title
+        notifyIcon.Visible = True
+        notifyIcon.ContextMenu = context_menu
+        notifyIcon.DoubleClick += self.open_from_tray
+
+        return notifyIcon
+
+    def draw_sensors_frame(self, parent):
+        if self.sensors_frame:
+            self.sensors_frame.grid_forget()
+        sensors_frame = ttk.LabelFrame(parent, text='Hardware Data')
+        sensors_frame.grid(column=0, row=0, padx=5, pady=5, ipady=3, sticky=(N, W, E)) #.pack(side="top", fill="both", expand=True, padx=5, pady=5, ipady=3)
+        sensors_frame.columnconfigure(3, weight=1)
+
+        self.number_labels, self.sensor_combos, self.value_labels = [], [], []
         Label(sensors_frame, text="#").grid(column=0, row=0, sticky=W)
         Label(sensors_frame, text="Data").grid(column=1, row=0, sticky=W)
         Label(sensors_frame, text="Value").grid(column=2, row=0, sticky=W)
         for i, sensor in enumerate(self.conf['sensors']):
-            self.number_labels[i] = StringVar()
-            lbl = Label(sensors_frame, textvariable=self.number_labels[i])
-            self.sensor_combos[i] = StringVar()
+            self.number_labels.append(StringVar())
+            Label(sensors_frame, textvariable=self.number_labels[i]).grid(column=0, row=i+1, sticky=W)
+            self.sensor_combos.append(StringVar())
             cmb = ttk.Combobox(sensors_frame, textvariable=self.sensor_combos[i], values=self.sensorNames, width=25, state='readonly')
-            self.value_labels[i] = StringVar()
-            vlbl = Label(sensors_frame, textvariable=self.value_labels[i])
-
-            lbl.grid(column=0, row=i+1, sticky=W)
-            cmb.grid(column=1, row=i+1, sticky=(W, E))
+            cmb.grid(column=1, row=i+1, sticky=W)
             cmb.bind('<<ComboboxSelected>>', self.change_sensor)
-            vlbl.grid(column=2, row=i+1, sticky=E)
+            self.value_labels.append(StringVar())
+            Label(sensors_frame, textvariable=self.value_labels[i]).grid(column=2, row=i+1, sticky=W)
+            if i>0:
+                Button(sensors_frame, text='-', height=1, borderwidth=1,
+                       command = lambda i=i: self.remove_sensor(i)).grid(column=3, row=i+1, sticky=E)
+
+        self.update_sensors_show()
+        if i<19:
+            Button(sensors_frame, text='+', command=self.add_sensor, height=1).grid(column=0, row=i+2, sticky=W)
         for child in sensors_frame.winfo_children(): child.grid_configure(padx=3)
 
         return sensors_frame
 
-    def update_all(self):
-        self.fetch_stats()
-        for i, sensor in enumerate(self.conf['sensors']):
-            value = self.sensorValues.get(sensor, 0)
-            if value != 'n/a' and sensor not in ['Time']:
-                value = '{}{}'.format(round(float(value), 2), self.sensorUnits.get(sensor, ''))
-            self.value_labels[i].set(value)
+    def add_sensor(self):
+        self.conf['sensors'].append('')
+        self.sensors_frame = self.draw_sensors_frame(self.root)
 
-        self.root.after(int(self.conf['refresh']*1000), self.update_all)
+    def remove_sensor(self, i):
+        if i>0:
+            del self.conf['sensors'][i]
+            self.sensors_frame = self.draw_sensors_frame(self.root)
 
     def draw_frame_configs(self, parent):
         configs_frame = Frame(parent)
-        configs_frame.pack(side="bottom", fill="both", expand=True, padx=5, pady=5) #.grid(column=0, row=0, padx=5, pady=5, sticky=(W, E, S))
-        configs_frame.columnconfigure(0, weight=1)
+        configs_frame.grid(column=0, row=1, padx=5, pady=5, sticky=(W, E)) #.pack(side="bottom", fill="both", expand=True, padx=5, pady=5)
+        #configs_frame.columnconfigure(0, weight=1)
+        combos_width = 15
+
+        self.serial_port = StringVar()
+        Label(configs_frame, text="Serial port").grid(column=0, row=1, sticky=W)
+        self.port_cmb = ttk.Combobox(configs_frame, textvariable=self.serial_port, values=self.check_serial_ports(),
+                                     postcommand=self.update_ports, state='readonly', width=combos_width)
+        self.port_cmb.grid(column=2, row=1, sticky=W)
+        self.port_cmb.bind('<<ComboboxSelected>>', self.change_port)
+
+        self.baudrate = StringVar()
+        Label(configs_frame, text="Baudrate").grid(column=0, row=2, sticky=W)
+        cmb = ttk.Combobox(configs_frame, textvariable=self.baudrate, values=port_rates, state='readonly', width=combos_width)
+        cmb.grid(column=2, row=2, sticky=W)
+        cmb.bind('<<ComboboxSelected>>', self.change_baudrate)
 
         self.refresh_period = StringVar()
-        Label(configs_frame, text="Data refresh period").grid(column=2, row=1, sticky=W)
-        cmb = ttk.Combobox(configs_frame, textvariable=self.refresh_period, values=refreshPeriods, state='readonly')
-        cmb.grid(column=2, row=2, sticky=(W, E))
+        Label(configs_frame, text="Refresh period").grid(column=0, row=3, sticky=W)
+        cmb = ttk.Combobox(configs_frame, textvariable=self.refresh_period, values=refresh_periods, state='readonly', width=combos_width)
+        cmb.grid(column=2, row=3, sticky=W)
         cmb.bind('<<ComboboxSelected>>', self.change_refresh)
 
         self.launch_at_start = BooleanVar()
@@ -195,32 +263,93 @@ class HW2Serial:
         self.minimize_to_tray = BooleanVar()
         chb = ttk.Checkbutton(configs_frame, text='Minimize to tray', variable=self.minimize_to_tray, command=self.change_minimize_to_tray)
         chb.grid(column=3, row=2, sticky=(W, E))
+        for child in configs_frame.winfo_children(): child.grid_configure(padx=2)
 
-        Button(configs_frame, text='Restore Default Config', command=self.restore_defaults).grid(column=1, row=3, sticky=(W, E))
-        Button(configs_frame, text='Load Saved Config', command=self.load_config_button).grid(column=2, row=3, sticky=(W, E))
-        Button(configs_frame, text='Save Config', command=self.save_config).grid(column=3, row=3, sticky=(W, E))
-
-        Button(configs_frame, text='Minimize', command=self.minimize).grid(column=2, row=5, sticky=(W, E))
-        Button(configs_frame, text='Quit', command=self.quit).grid(column=3, row=5, sticky=(W, E))
-
-        for child in configs_frame.winfo_children(): child.grid_configure(padx=2, pady=2)
+        self.canvas = Canvas(configs_frame, width=100, height=20)
+        r, x, y = 5, 11, 11
+        self.circle = self.canvas.create_oval(x-r, y-r, x+r, y+r, fill="red", outline="")
+        self.connection = self.canvas.create_text(22,11, anchor=W, text='Not connected')
+        self.canvas.grid(column=3, row=3, sticky=W)
 
         return configs_frame
 
-    def restore_defaults(self):
-        if messagebox.askyesno(message='Are you sure you want to set default config?', icon = 'question', title = 'Loading default config'):
-            self.conf = defaults
-            self.update_config()
+    def draw_control_buttons(self, parent):
+        buttons_frame = Frame(parent)
+        buttons_frame.grid(column=0, row=2, padx=5, pady=5, sticky=(E, S)) #.pack(side="bottom", fill="both", expand=True, padx=5, pady=5)
+        #buttons_frame.columnconfigure(0, weight=1)
+
+        Button(buttons_frame, text='Default Config', command=self.restore_defaults).grid(column=1, row=3, sticky=(W, E))
+        Button(buttons_frame, text='Load Saved Config', command=self.load_config_button).grid(column=2, row=3, sticky=(W, E))
+        Button(buttons_frame, text='Save Config', command=self.save_config).grid(column=3, row=3, sticky=(W, E))
+
+        Button(buttons_frame, text='Minimize', command=self.minimize).grid(column=2, row=5, sticky=(W, E))
+        Button(buttons_frame, text='Quit', command=self.quit).grid(column=3, row=5, sticky=(W, E))
+
+        for child in buttons_frame.winfo_children(): child.grid_configure(padx=2, pady=2)
+
+        return buttons_frame
+
+    def update_ports(self):
+        self.port_cmb['values'] = self.check_serial_ports()
+
+    def format_sensor_value(self, i):
+        sensor = self.conf['sensors'][i]
+        value = self.sensorValues.get(sensor, 0)
+        if value != 'n/a' and sensor not in [time_sensor, cpus_freq, cpus_load, cpus_temp]:
+            value = '{}{}'.format(value, self.sensorUnits.get(sensor, ''))
+        self.value_labels[i].set(value)
 
     def change_sensor(self, event=None):
-        if event:
+        """Change which sensor to send to serial port"""
+        if event:       # check if it's called from binding
             for i, sensor in enumerate(self.conf['sensors']):
                 if self.sensor_combos[i].get() != sensor:
                     self.conf['sensors'][i] = self.sensor_combos[i].get()
-                    value = self.sensorValues.get(self.sensor_combos[i].get(), 0)
-                    if value != 'n/a' and self.sensor_combos[i].get() not in ['Time']:
-                        value = '{}{}'.format(round(float(value), 2), self.sensorUnits.get(self.sensor_combos[i].get(), ''))
-                    self.value_labels[i].set(value)
+                    self.format_sensor_value(i)
+
+    def update_sensors_show(self):
+        for i, sensor in enumerate(self.conf['sensors']):
+            self.number_labels[i].set(i)
+            self.sensor_combos[i].set(sensor)
+            self.format_sensor_value(i)
+
+    def update_config(self):
+        """Redraw config parameters in GUI from dict 'conf'"""
+        self.update_sensors_show()
+        self.serial_port.set(self.conf['serial_port'])
+        self.baudrate.set(self.conf['baudrate'])
+        self.refresh_period.set(self.conf['refresh'])
+        self.launch_at_start.set(self.conf['launch_at_startup'])
+        self.minimize_to_tray.set(self.conf['minimize_to_tray'])
+        self.change_minimize_to_tray()
+        self.change_launch_at_start()
+
+    def load_config_button(self):
+        if messagebox.askyesno(message='Are you sure you want to reload config?', icon = 'question', title = 'Loading saved config'):
+            self.conf = self.load_config()
+            self.update_config()
+
+    def save_config(self):
+        if messagebox.askyesno(message='Are you sure you want to save current config?', icon='question', title='Saving config'):
+            with open(config_file, 'w') as conf_file:
+                dump(self.conf, conf_file)
+
+    def load_config(self):
+        """Loading config from {}""".format(config_file)
+        try:
+            with open(config_file) as conf_file:
+                conf = load(conf_file)
+        except IOError:
+            conf = {}
+        if 'sensors' not in conf:
+            conf = defaults
+        self.savedConf = conf
+        return conf
+
+    def restore_defaults(self):
+        if messagebox.askyesno(message='Are you sure you want to set default config?', icon = 'question', title = 'Loading default config'):
+            self.conf = defaults.copy()
+            self.update_config()
 
     def change_minimize_to_tray(self):
         self.conf['minimize_to_tray'] = self.minimize_to_tray.get()
@@ -236,6 +365,16 @@ class HW2Serial:
         else:
             self.remove_launch_at_boot()
 
+    def change_port(self, event=None):
+        if event:
+            value = self.serial_port.get()
+            self.conf['serial_port'] = value
+
+    def change_baudrate(self, event=None):
+        if event:
+            value = self.baudrate.get()
+            self.conf['baudrate'] = int(value)
+
     def change_refresh(self, event=None):
         if event:
             value = self.refresh_period.get()
@@ -244,41 +383,18 @@ class HW2Serial:
     def open_from_tray(self, sender, args):
         self.root.deiconify()
 
-    def icon(self):
-        clr.AddReference('System.ComponentModel')
-        clr.AddReference('System.Windows.Forms')
-        clr.AddReference('System.Drawing')
-        from System.ComponentModel import Container
-        from System.Windows.Forms import NotifyIcon, MenuItem, ContextMenu
-        from System.Drawing import Icon
-
-        self.components = Container()
-        context_menu = ContextMenu()
-        menu_item = MenuItem('Show')
-        menu_item.Click += self.open_from_tray
-        context_menu.MenuItems.Add(menu_item)
-        menu_item = MenuItem('Quit')
-        menu_item.Click += self.quit
-        context_menu.MenuItems.Add(menu_item)
-        notifyIcon = NotifyIcon(self.components)
-        notifyIcon.Icon = Icon('hw2serial.ico')
-        notifyIcon.Text = title
-        notifyIcon.Visible = True
-        notifyIcon.ContextMenu = context_menu
-        notifyIcon.DoubleClick += self.open_from_tray
-
-        return notifyIcon
-
     def set_launch_at_boot(self):
+        """Setting start on boot in windows registry"""
         from Microsoft.Win32 import Registry
 
-        path = os.path.dirname(os.path.realpath(__file__))
+        file_path = path.dirname(path.realpath(__file__))
         reg_key = Registry.CurrentUser.OpenSubKey(run_key, True)
         if reg_key.GetValue(title, 'no_key') != 'no_key':
             return None
-        reg_key.SetValue(title, os.path.join(path,prog_name))
+        reg_key.SetValue(title, path.join(file_path, prog_name))
 
     def remove_launch_at_boot(self):
+        """Removing start on boot in windows registry"""
         from Microsoft.Win32 import Registry
 
         reg_key = Registry.CurrentUser.OpenSubKey(run_key, True)
@@ -288,15 +404,26 @@ class HW2Serial:
         reg_key.Close()
 
 def is_admin():
+    """Check if program runs with admin rights. Needed for some sensors"""
     try:
-        return ctypes.windll.shell32.IsUserAnAdmin()
+        return windll.shell32.IsUserAnAdmin()
     except:
         return False
+
+def icon_path(ico_path):
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return path.join(base_path, ico_path)
 
 if __name__ == '__main__':
     if is_admin():
         root = Tk()
+        ico_path = icon_path('hw2serial.ico')
         HW2Serial(root)
+        root.iconbitmap(ico_path)
         root.mainloop()
     else:
-        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, __file__, None, 1)
+        windll.shell32.ShellExecuteW(None, "runas", executable, __file__, None, 1)
