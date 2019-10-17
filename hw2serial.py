@@ -17,7 +17,6 @@ hwTypes = ['Mainboard','SuperIO','CPU','RAM','GpuNvidia','GpuAti','TBalancer','H
 sensorTypes = ['Voltage','Clock','Temperature','Load','Fan','Flow','Control','Level','Factor','Power','Data','SmallData','Data']
 sensorUnits = [' V', 'MHz', '°C', '%', ' RPM', ' L/h', '%', '%', '', 'W', '', '', ''] # \u00B0C
 run_key = 'Software\Microsoft\Windows\CurrentVersion\Run'
-prog_name = 'hw2serial.py'
 title = 'HW2Serial'
 
 refresh_periods = [2, 1, 0.5, 0.2, 0.1]      # period in seconds
@@ -37,7 +36,6 @@ class HW2Serial:
         self.root = parent
         self.root.title(title)
 
-        self.savedConf = None
         self.conf = self.load_config()
 
         self.sensorValues = {}
@@ -104,14 +102,19 @@ class HW2Serial:
 
     def parse_sensor(self, sensor):
         """Parsing sensor data and save it to class variables"""
-        value = sensor.Value if sensor.Value else 'n/a'
-        unit = sensorUnits[sensor.SensorType] if value != 'n/a' else ''
+        value = sensor.Value if sensor.Value else '0'
+        unit = sensorUnits[sensor.SensorType] if sensor.Value else ''
         unit = unit if sensorTypes[sensor.SensorType] not in ['Data', 'SmallData', 'Factor'] else ''
         if sensorTypes[sensor.SensorType] in ['Data', 'SmallData', 'Factor']:
             sensorname = '{}'.format(sensor.Name)
         else:
             sensorname = '{} {}'.format(sensor.Name, sensorTypes[sensor.SensorType]) # sensor.Hardware.Name
-        sensorvalue = '{:.0f}'.format(float(value)) if value != 'n/a' else '0'
+        if sensorname in ['Used Memory', 'Available Memory']:
+            sensorvalue = '{:.3f}'.format(float(value))
+        elif sensorTypes[sensor.SensorType] in ['Voltage']:
+            sensorvalue = '{:.1f}'.format(float(value))
+        else:
+            sensorvalue = '{:.0f}'.format(float(value))
         sensorunit = unit
         if 'CPU Core ' in sensor.Name:
             if sensorTypes[sensor.SensorType] == 'Clock':
@@ -342,7 +345,7 @@ class HW2Serial:
         except IOError:
             conf = {}
         if 'sensors' not in conf:
-            conf = defaults
+            conf = defaults.copy()
         self.savedConf = conf
         return conf
 
@@ -387,11 +390,14 @@ class HW2Serial:
         """Setting start on boot in windows registry"""
         from Microsoft.Win32 import Registry
 
-        file_path = path.dirname(path.realpath(__file__))
+        if 'python.exe' in executable:
+            command_run = executable + ' ' + path.dirname(path.realpath(__file__))
+        else:
+            command_run = executable
         reg_key = Registry.CurrentUser.OpenSubKey(run_key, True)
         if reg_key.GetValue(title, 'no_key') != 'no_key':
             return None
-        reg_key.SetValue(title, path.join(file_path, prog_name))
+        reg_key.SetValue(title, command_run)
 
     def remove_launch_at_boot(self):
         """Removing start on boot in windows registry"""
@@ -415,7 +421,7 @@ def icon_path(ico_path):
         # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
-        base_path = os.path.abspath(".")
+        base_path = path.abspath(".")
     return path.join(base_path, ico_path)
 
 if __name__ == '__main__':
