@@ -28,6 +28,7 @@ defaults = {
     'refresh': 1,
     'minimize_to_tray': True,
     'launch_at_startup': False,
+    'admin_only': True,
     'sensors': [time_sensor,'CPU Package Temperature','CPU Total Load', '', 'GPU Core Clock', '']
 }
 
@@ -63,10 +64,10 @@ class HW2Serial:
         try:
             with Serial(self.conf['serial_port'], self.conf['baudrate'], timeout=1) as ser:
                 ser.write(' '.join(self.data2transfer).encode())
-                self.canvas.itemconfig(self.connection, text='Connected')
+                #self.canvas.itemconfig(self.connection, text='Connected')
                 self.canvas.itemconfig(self.circle, fill='green2')
         except (OSError, SerialException):
-            self.canvas.itemconfig(self.connection, text='Not connected')
+            #self.canvas.itemconfig(self.connection, text='Not connected')
             self.canvas.itemconfig(self.circle, fill='red2')
 
     def init_ohm(self):
@@ -236,12 +237,17 @@ class HW2Serial:
 
     def draw_frame_configs(self, parent):
         configs_frame = Frame(parent)
-        configs_frame.grid(column=0, row=1, padx=5, pady=5, sticky=(W, E)) #.pack(side="bottom", fill="both", expand=True, padx=5, pady=5)
+        configs_frame.grid(column=0, row=1, sticky=(W, E))
         #configs_frame.columnconfigure(0, weight=1)
         combos_width = 15
 
         self.serial_port = StringVar()
-        Label(configs_frame, text="Serial port").grid(column=0, row=1, sticky=W)
+#        Label(configs_frame, text="Serial port").grid(column=0, row=1, sticky=W)
+        self.canvas = Canvas(configs_frame, width=80, height=16)
+        r, x, y = 5, 75, 11
+        self.circle = self.canvas.create_oval(x-r, y-r, x+r, y+r, fill="red", outline="")
+        self.connection = self.canvas.create_text(4, 11, anchor=W, text='Serial port')
+        self.canvas.grid(column=0, row=1, sticky=W)
         self.port_cmb = ttk.Combobox(configs_frame, textvariable=self.serial_port, values=self.check_serial_ports(),
                                      postcommand=self.update_ports, state='readonly', width=combos_width)
         self.port_cmb.grid(column=2, row=1, sticky=W)
@@ -266,29 +272,27 @@ class HW2Serial:
         self.minimize_to_tray = BooleanVar()
         chb = ttk.Checkbutton(configs_frame, text='Minimize to tray', variable=self.minimize_to_tray, command=self.change_minimize_to_tray)
         chb.grid(column=3, row=2, sticky=(W, E))
+
+        self.admin_only = BooleanVar()
+        chb = ttk.Checkbutton(configs_frame, text='Run as admin only', variable=self.admin_only, command=self.change_admin_only)
+        chb.grid(column=3, row=3, sticky=(W, E))
+
         for child in configs_frame.winfo_children(): child.grid_configure(padx=2)
-
-        self.canvas = Canvas(configs_frame, width=100, height=20)
-        r, x, y = 5, 11, 11
-        self.circle = self.canvas.create_oval(x-r, y-r, x+r, y+r, fill="red", outline="")
-        self.connection = self.canvas.create_text(22,11, anchor=W, text='Not connected')
-        self.canvas.grid(column=3, row=3, sticky=W)
-
         return configs_frame
 
     def draw_control_buttons(self, parent):
         buttons_frame = Frame(parent)
-        buttons_frame.grid(column=0, row=2, padx=5, pady=5, sticky=(E, S)) #.pack(side="bottom", fill="both", expand=True, padx=5, pady=5)
+        buttons_frame.grid(column=0, row=2, padx=5, pady=3, sticky=(E, S))
         #buttons_frame.columnconfigure(0, weight=1)
 
-        Button(buttons_frame, text='Default Config', command=self.restore_defaults).grid(column=1, row=3, sticky=(W, E))
-        Button(buttons_frame, text='Load Saved Config', command=self.load_config_button).grid(column=2, row=3, sticky=(W, E))
-        Button(buttons_frame, text='Save Config', command=self.save_config).grid(column=3, row=3, sticky=(W, E))
+        Button(buttons_frame, text='Default Config', command=self.restore_defaults).grid(column=1, row=0, sticky=(W, E))
+        Button(buttons_frame, text='Load Saved Config', command=self.load_config_button).grid(column=2, row=0, sticky=(W, E))
+        Button(buttons_frame, text='Save Config', command=self.save_config).grid(column=3, row=0, sticky=(W, E))
 
         Button(buttons_frame, text='Minimize', command=self.minimize).grid(column=2, row=5, sticky=(W, E))
         Button(buttons_frame, text='Quit', command=self.quit).grid(column=3, row=5, sticky=(W, E))
 
-        for child in buttons_frame.winfo_children(): child.grid_configure(padx=2, pady=2)
+        for child in buttons_frame.winfo_children(): child.grid_configure(padx=2, pady=1)
 
         return buttons_frame
 
@@ -319,11 +323,12 @@ class HW2Serial:
     def update_config(self):
         """Redraw config parameters in GUI from dict 'conf'"""
         self.update_sensors_show()
-        self.serial_port.set(self.conf['serial_port'])
-        self.baudrate.set(self.conf['baudrate'])
-        self.refresh_period.set(self.conf['refresh'])
-        self.launch_at_start.set(self.conf['launch_at_startup'])
-        self.minimize_to_tray.set(self.conf['minimize_to_tray'])
+        self.serial_port.set(self.conf.get('serial_port', ''))
+        self.baudrate.set(self.conf.get('baudrate', defaults.get('baudrate', 9600)))
+        self.refresh_period.set(self.conf.get('refresh', defaults.get('refresh', 1)))
+        self.launch_at_start.set(self.conf.get('launch_at_startup', defaults.get('launch_at_startup', 1)))
+        self.minimize_to_tray.set(self.conf.get('minimize_to_tray', defaults.get('minimize_to_tray', False)))
+        self.admin_only.set(self.conf.get('admin_only', defaults.get('admin_only', False)))
         self.change_minimize_to_tray()
         self.change_launch_at_start()
 
@@ -353,6 +358,9 @@ class HW2Serial:
         if messagebox.askyesno(message='Are you sure you want to set default config?', icon = 'question', title = 'Loading default config'):
             self.conf = defaults.copy()
             self.update_config()
+
+    def change_admin_only(self):
+        self.conf['admin_only'] = self.admin_only.get()
 
     def change_minimize_to_tray(self):
         self.conf['minimize_to_tray'] = self.minimize_to_tray.get()
@@ -425,11 +433,11 @@ def icon_path(ico_path):
     return path.join(base_path, ico_path)
 
 if __name__ == '__main__':
-    if is_admin():
-        root = Tk()
-        ico_path = icon_path('hw2serial.ico')
-        HW2Serial(root)
+    root = Tk()
+    ico_path = icon_path('hw2serial.ico')
+    h2s = HW2Serial(root)
+    if not is_admin() and h2s.conf.get('admin_only', False):
+        windll.shell32.ShellExecuteW(None, "runas", executable, __file__, None, 1)
+    else:
         root.iconbitmap(ico_path)
         root.mainloop()
-    else:
-        windll.shell32.ShellExecuteW(None, "runas", executable, __file__, None, 1)
