@@ -3,9 +3,9 @@ from clr import AddReference
 from serial import Serial, SerialException
 from os import path
 from ctypes import windll
-import time
-from sys import executable
+import time, sys
 from json import dump, load
+import subprocess
 
 config_file = 'hw2serial.conf'
 ico_path = 'hw2serial.ico'
@@ -38,7 +38,9 @@ class HW2Serial:
         self.root.title(title)
 
         self.conf = self.load_config()
-
+        if not is_admin() and self.conf.get('admin_only', False):
+            windll.shell32.ShellExecuteW(None, "runas", sys.executable, __file__, None, 1)
+            return None
         self.sensorValues = {}
         self.sensorUnits = {}
         self.init_ohm()
@@ -48,8 +50,11 @@ class HW2Serial:
 
         self.sensors_frame = None
         self.draw_GUI()
+        self.minimize()
 
         self.update_all()
+        self.root.iconbitmap(ico_path)
+        self.root.mainloop()
 
     def update_all(self):
         """Update Hardware info, show it on GUI, send to serial. Launched every {} seconds""".format(self.conf['refresh'])
@@ -62,13 +67,18 @@ class HW2Serial:
     def transfer_data(self):
         """Sending data to serial port"""
         try:
-            with Serial(self.conf['serial_port'], self.conf['baudrate'], timeout=1) as ser:
-                ser.write(' '.join(self.data2transfer).encode())
-                #self.canvas.itemconfig(self.connection, text='Connected')
-                self.canvas.itemconfig(self.circle, fill='green2')
+            #with Serial(self.conf['serial_port'], self.conf['baudrate'], timeout=1) as ser:
+            if not hasattr(self, 'ser') or not self.ser.is_open:
+                self.ser = Serial(self.conf['serial_port'], self.conf['baudrate'])
+            self.ser.write(';'.join(self.data2transfer).encode())
+            self.ser.write("E".encode())
+            #self.canvas.itemconfig(self.connection, text='Connected')
+            self.canvas.itemconfig(self.circle, fill='green2')
         except (OSError, SerialException):
             #self.canvas.itemconfig(self.connection, text='Not connected')
             self.canvas.itemconfig(self.circle, fill='red2')
+            if hasattr(self, 'ser') and self.ser.is_open:
+                self.ser.close()
 
     def init_ohm(self):
         """Initialize sensors object from OpenHardwareMonitorLib.dll"""
@@ -113,11 +123,13 @@ class HW2Serial:
         if sensorname in ['Used Memory', 'Available Memory']:
             sensorvalue = '{:.3f}'.format(float(value))
         elif sensorTypes[sensor.SensorType] in ['Voltage']:
-            sensorvalue = '{:.1f}'.format(float(value))
+            sensorvalue = '{:.2f}'.format(float(value))
+        #elif sensorTypes[sensor.SensorType] in ['Load','Temperature','Clock','']:
+        #    sensorvalue = '{:.2f}'.format(float(value))
         else:
             sensorvalue = '{:.0f}'.format(float(value))
         sensorunit = unit
-        if 'CPU Core ' in sensor.Name:
+        if 'Core #' in sensor.Name:
             if sensorTypes[sensor.SensorType] == 'Clock':
                 self.cores_freq.append(sensorvalue)
             if sensorTypes[sensor.SensorType] == 'Load':
@@ -380,11 +392,15 @@ class HW2Serial:
         if event:
             value = self.serial_port.get()
             self.conf['serial_port'] = value
+            if hasattr(self, 'ser') and self.ser.is_open:
+                self.ser.close()
 
     def change_baudrate(self, event=None):
         if event:
             value = self.baudrate.get()
             self.conf['baudrate'] = int(value)
+            if hasattr(self, 'ser') and self.ser.is_open:
+                self.ser.close()
 
     def change_refresh(self, event=None):
         if event:
@@ -396,26 +412,16 @@ class HW2Serial:
 
     def set_launch_at_boot(self):
         """Setting start on boot in windows registry"""
-        from Microsoft.Win32 import Registry
 
-        if 'python.exe' in executable:
-            command_run = executable + ' ' + path.dirname(path.realpath(__file__))
+        if 'python.exe' in sys.executable:
+            command_run = sys.executable + ' ' + path.dirname(path.realpath(__file__))
         else:
-            command_run = executable
-        reg_key = Registry.CurrentUser.OpenSubKey(run_key, True)
-        if reg_key.GetValue(title, 'no_key') != 'no_key':
-            return None
-        reg_key.SetValue(title, command_run)
+            command_run = sys.executable
+        subprocess.call('schtasks /create /f /SC ONLOGON /TN "{}" /TR "{}" /RL HIGHEST'.format(title, command_run))
 
     def remove_launch_at_boot(self):
         """Removing start on boot in windows registry"""
-        from Microsoft.Win32 import Registry
-
-        reg_key = Registry.CurrentUser.OpenSubKey(run_key, True)
-        if reg_key.GetValue(title, 'no_key') == 'no_key':
-            return None
-        reg_key.DeleteValue(title)
-        reg_key.Close()
+        subprocess.call('schtasks /delete /f /TN "{}"'.format(title))
 
 def is_admin():
     """Check if program runs with admin rights. Needed for some sensors"""
@@ -429,15 +435,15 @@ def icon_path(ico_path):
         # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
-        base_path = path.abspath(".")
+        base_path = path.abspath('.')
     return path.join(base_path, ico_path)
 
 if __name__ == '__main__':
+    if getattr(sys, 'frozen', False):
+        app_path = path.dirname(sys.executable)
+    elif __file__:
+        app_path = path.dirname(__file__)
+    config_file = path.join(app_path, config_file)
     root = Tk()
-    ico_path = icon_path('hw2serial.ico')
+    ico_path = icon_path(ico_path)
     h2s = HW2Serial(root)
-    if not is_admin() and h2s.conf.get('admin_only', False):
-        windll.shell32.ShellExecuteW(None, "runas", executable, __file__, None, 1)
-    else:
-        root.iconbitmap(ico_path)
-        root.mainloop()
